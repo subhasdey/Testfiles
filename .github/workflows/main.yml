@@ -11,58 +11,55 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      BACKEND_URL: "https://regi-backend-service-226630681778.us-central1.run.app"
     steps:
       - uses: actions/checkout@v4.2.2
 
       - name: Submit compliance analysis
         id: submit
         run: |
-          PAYLOAD=$(printf '{"framework":"pci","git_url":"https://github.com/%s","branch":"%s","language":"javascript"}' \
-            "${{ github.repository }}" "${{ github.ref_name }}")
+          ASYNC_ID="async-${{ github.run_id }}-${{ github.run_attempt }}"
 
-          HTTP_CODE=$(curl -sL -o /tmp/response.json -w "%{http_code}" \
-            -X POST https://www.regiagents.com/api/v1/analyze \
-            -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}" \
+          HTTP_CODE=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "${BACKEND_URL}/analyze-async" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
+            -d "{
+              \"git_url\": \"https://github.com/${{ github.repository }}\",
+              \"branch\": \"${{ github.ref_name }}\",
+              \"language\": \"javascript\",
+              \"sector_name\": \"Payment Card Industry\",
+              \"sector_framework\": \"PCI DSS\",
+              \"level\": \"LEVEL_1\",
+              \"async_id\": \"${ASYNC_ID}\"
+            }")
+
+          echo "Submit HTTP status: $HTTP_CODE"
+          cat /tmp/response.json
 
           if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
-            echo "::error::API submission failed with HTTP $HTTP_CODE: $(cat /tmp/response.json)"
+            echo "::error::Submission failed with HTTP $HTTP_CODE"
             exit 1
-          fi
-
-          ASYNC_ID=$(jq -r '.data.async_id' /tmp/response.json)
-          POLL_AFTER=$(jq -r '.data.poll_after_seconds' /tmp/response.json)
-
-          if [[ -z "$ASYNC_ID" || "$ASYNC_ID" == "null" ]]; then
-            echo "::error::Failed to get async_id. Response: $(cat /tmp/response.json)"
-            exit 1
-          fi
-
-          if ! [[ "$POLL_AFTER" =~ ^[0-9]+$ ]]; then
-            echo "::warning::Invalid poll_after_seconds '$POLL_AFTER', defaulting to 30"
-            POLL_AFTER=30
           fi
 
           echo "ASYNC_ID=$ASYNC_ID" >> $GITHUB_OUTPUT
-          echo "POLL_AFTER=$POLL_AFTER" >> $GITHUB_OUTPUT
 
       - name: Wait and fetch results
         run: |
           ASYNC_ID="${{ steps.submit.outputs.ASYNC_ID }}"
-          POLL_AFTER="${{ steps.submit.outputs.POLL_AFTER }}"
           MAX_ATTEMPTS=20
-          SLEEP_SEC=15
+          SLEEP_SEC=30
 
-          echo "Waiting ${POLL_AFTER}s before first poll..."
-          sleep "$POLL_AFTER"
+          echo "Waiting 30s before first poll..."
+          sleep 30
 
           STATUS=""
 
           for i in $(seq 1 $MAX_ATTEMPTS); do
-            HTTP_CODE=$(curl -sL -o /tmp/result.json -w "%{http_code}" \
-              "https://www.regiagents.com/api/v1/results/${ASYNC_ID}?framework=pci" \
-              -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}")
+            HTTP_CODE=$(curl -s -o /tmp/result.json -w "%{http_code}" \
+              -X GET "${BACKEND_URL}/results/${ASYNC_ID}")
+
+            echo "Attempt $i: HTTP $HTTP_CODE"
+            cat /tmp/result.json
 
             if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
               echo "::warning::Attempt $i: HTTP $HTTP_CODE, retrying in ${SLEEP_SEC}s..."
@@ -70,9 +67,9 @@ jobs:
               continue
             fi
 
-            STATUS=$(jq -r '.data.status' /tmp/result.json)
+            STATUS=$(jq -r '.status // .data.status // "unknown"' /tmp/result.json)
 
-            if [[ "$STATUS" == "completed" || "$STATUS" == "failed" ]]; then
+            if [[ "$STATUS" == "completed" || "$STATUS" == "done" || "$STATUS" == "failed" ]]; then
               break
             fi
 
@@ -80,13 +77,22 @@ jobs:
             sleep $SLEEP_SEC
           done
 
-          if [[ "$STATUS" != "completed" ]]; then
+          echo "Final status: $STATUS"
+          echo "Full result:"
+          cat /tmp/result.json
+
+          if [[ "$STATUS" == "failed" ]]; then
+            echo "::error::Compliance scan failed"
+            exit 1
+          fi
+
+          if [[ "$STATUS" != "completed" && "$STATUS" != "done" ]]; then
             echo "::error::Compliance scan did not complete (final status: $STATUS)"
             exit 1
           fi
 
-          SCORE=$(jq -r '.data.results.complianceScore // "N/A"' /tmp/result.json)
-          FINDINGS=$(jq -r '.data.results.findings | length' /tmp/result.json)
+          SCORE=$(jq -r '.complianceScore // .data.results.complianceScore // .data.complianceScore // "N/A"' /tmp/result.json)
+          FINDINGS=$(jq -r 'if .findings then (.findings | length) elif .data.results.findings then (.data.results.findings | length) else 0 end' /tmp/result.json)
 
           echo "## Compliance Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "| | |" >> $GITHUB_STEP_SUMMARY
