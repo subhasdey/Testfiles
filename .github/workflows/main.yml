@@ -20,7 +20,7 @@ jobs:
           PAYLOAD=$(printf '{"framework":"pci","git_url":"https://github.com/%s","branch":"%s","language":"javascript"}' \
             "${{ github.repository }}" "${{ github.ref_name }}")
 
-          HTTP_CODE=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+          HTTP_CODE=$(curl -sL -o /tmp/response.json -w "%{http_code}" \
             -X POST https://www.regiagents.com/api/v1/analyze \
             -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}" \
             -H "Content-Type: application/json" \
@@ -60,7 +60,7 @@ jobs:
           STATUS=""
 
           for i in $(seq 1 $MAX_ATTEMPTS); do
-            HTTP_CODE=$(curl -s -o /tmp/result.json -w "%{http_code}" \
+            HTTP_CODE=$(curl -sL -o /tmp/result.json -w "%{http_code}" \
               "https://www.regiagents.com/api/v1/results/${ASYNC_ID}?framework=pci" \
               -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}")
 
