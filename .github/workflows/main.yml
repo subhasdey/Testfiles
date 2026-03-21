@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-      BACKEND_URL: "https://regi-backend-service-226630681778.us-central1.run.app"
+      BACKEND_URL: ${{ secrets.BACKEND_URL }}
     steps:
       - uses: actions/checkout@v4.2.2
 
