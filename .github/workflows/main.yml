@@ -44,51 +44,29 @@ jobs:
 
           echo "ASYNC_ID=$ASYNC_ID" >> $GITHUB_OUTPUT
 
-      - name: Wait and fetch results
+      - name: Wait for analysis to complete
+        run: sleep 60
+
+      - name: Fetch results
         run: |
           ASYNC_ID="${{ steps.submit.outputs.ASYNC_ID }}"
-          MAX_ATTEMPTS=20
-          SLEEP_SEC=30
 
-          echo "Waiting 30s before first poll..."
-          sleep 30
+          HTTP_CODE=$(curl -s -o /tmp/result.json -w "%{http_code}" \
+            -X GET "${BACKEND_URL}/results/${ASYNC_ID}")
 
-          STATUS=""
-
-          for i in $(seq 1 $MAX_ATTEMPTS); do
-            HTTP_CODE=$(curl -s -o /tmp/result.json -w "%{http_code}" \
-              -X GET "${BACKEND_URL}/results/${ASYNC_ID}")
-
-            echo "Attempt $i: HTTP $HTTP_CODE"
-            cat /tmp/result.json
-
-            if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
-              echo "::warning::Attempt $i: HTTP $HTTP_CODE, retrying in ${SLEEP_SEC}s..."
-              sleep $SLEEP_SEC
-              continue
-            fi
-
-            STATUS=$(jq -r '.status // .data.status // "unknown"' /tmp/result.json)
-
-            if [[ "$STATUS" == "completed" || "$STATUS" == "done" || "$STATUS" == "failed" ]]; then
-              break
-            fi
-
-            echo "Attempt $i: status=$STATUS, retrying in ${SLEEP_SEC}s..."
-            sleep $SLEEP_SEC
-          done
-
-          echo "Final status: $STATUS"
-          echo "Full result:"
+          echo "HTTP status: $HTTP_CODE"
           cat /tmp/result.json
 
-          if [[ "$STATUS" == "failed" ]]; then
-            echo "::error::Compliance scan failed"
+          if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
+            echo "::error::Failed to fetch results with HTTP $HTTP_CODE"
             exit 1
           fi
 
-          if [[ "$STATUS" != "completed" && "$STATUS" != "done" ]]; then
-            echo "::error::Compliance scan did not complete (final status: $STATUS)"
+          STATUS=$(jq -r '.status // .data.status // "unknown"' /tmp/result.json)
+          echo "Final status: $STATUS"
+
+          if [[ "$STATUS" == "failed" ]]; then
+            echo "::error::Compliance scan failed"
             exit 1
           fi
 
