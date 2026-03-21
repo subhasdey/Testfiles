@@ -1,28 +1,45 @@
-import time, requests
+name: Regi Compliance Scan
 
-API_KEY = "regi_live_8db1903e38b0d94410f20321328587071860d1aab516b14d"
-BASE    = "https://www.regiagents.com"
-HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
-def analyze_repo(git_url: str, framework: str = "pci") -> dict:
-    # 1. Submit
-    res = requests.post(f"{BASE}/api/v1/analyze",
-        headers={**HEADERS, "Content-Type": "application/json"},
-        json={"framework": framework, "git_url": git_url, "language": "python"},
-    )
-    data = res.json()["data"]
-    print(f"Submitted: {data['async_id']}")
+jobs:
+  compliance-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-    # 2. Poll
-    time.sleep(data.get("poll_after_seconds", 120))
-    while True:
-        poll = requests.get(
-            f"{BASE}/api/v1/results/{data['async_id']}?framework={framework}",
-            headers=HEADERS,
-        )
-        result = poll.json()["data"]
-        if result["status"] in ("completed", "failed"):
-            return result
-        time.sleep(result.get("retry_after_seconds", 30))
+      - name: Submit compliance analysis
+        id: submit
+        run: |
+          RESPONSE=$(curl -s -X POST https://www.regiagents.com/api/v1/analyze \
+            -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "framework": "pci",
+              "git_url": "https://github.com/${{ github.repository }}",
+              "branch": "${{ github.ref_name }}",
+              "language": "javascript"
+            }')
+          echo "ASYNC_ID=$(echo $RESPONSE | jq -r '.data.async_id')" >> $GITHUB_OUTPUT
+          echo "POLL_AFTER=$(echo $RESPONSE | jq -r '.data.poll_after_seconds')" >> $GITHUB_OUTPUT
 
-print(analyze_repo("https://github.com/your-org/your-repo"))
+      - name: Wait for analysis
+        run: sleep ${{ steps.submit.outputs.POLL_AFTER }}
+
+      - name: Fetch results
+        run: |
+          RESULT=$(curl -s "https://www.regiagents.com/api/v1/results/${{ steps.submit.outputs.ASYNC_ID }}?framework=pci" \
+            -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}")
+          STATUS=$(echo $RESULT | jq -r '.data.status')
+          SCORE=$(echo $RESULT | jq -r '.data.results.complianceScore // "N/A"')
+          FINDINGS=$(echo $RESULT | jq -r '.data.results.findings | length')
+          echo "## Compliance Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|-|-|" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | $STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Score | $SCORE |" >> $GITHUB_STEP_SUMMARY
+          echo "| Findings | $FINDINGS |" >> $GITHUB_STEP_SUMMARY
