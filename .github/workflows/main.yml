@@ -9,37 +9,98 @@ on:
 jobs:
   compliance-scan:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Submit compliance analysis
         id: submit
         run: |
-          RESPONSE=$(curl -s -X POST https://www.regiagents.com/api/v1/analyze \
+          PAYLOAD=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg branch "${{ github.ref_name }}" \
+            '{
+              framework: "pci",
+              git_url: ("https://github.com/" + $repo),
+              branch: $branch,
+              language: "javascript"
+            }')
+
+          RESPONSE=$(curl -sf -X POST https://www.regiagents.com/api/v1/analyze \
             -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "framework": "pci",
-              "git_url": "https://github.com/${{ github.repository }}",
-              "branch": "${{ github.ref_name }}",
-              "language": "javascript"
-            }')
-          echo "ASYNC_ID=$(echo $RESPONSE | jq -r '.data.async_id')" >> $GITHUB_OUTPUT
-          echo "POLL_AFTER=$(echo $RESPONSE | jq -r '.data.poll_after_seconds')" >> $GITHUB_OUTPUT
+            -d "$PAYLOAD")
 
-      - name: Wait for analysis
-        run: sleep ${{ steps.submit.outputs.POLL_AFTER }}
+          ASYNC_ID=$(echo "$RESPONSE" | jq -r '.data.async_id')
+          POLL_AFTER=$(echo "$RESPONSE" | jq -r '.data.poll_after_seconds')
 
-      - name: Fetch results
+          if [[ -z "$ASYNC_ID" || "$ASYNC_ID" == "null" ]]; then
+            echo "::error::Failed to get async_id from submission response"
+            exit 1
+          fi
+
+          if ! [[ "$POLL_AFTER" =~ ^[0-9]+$ ]]; then
+            echo "::warning::Invalid poll_after_seconds value '$POLL_AFTER', defaulting to 30"
+            POLL_AFTER=30
+          fi
+
+          echo "ASYNC_ID=$ASYNC_ID" >> $GITHUB_OUTPUT
+          echo "POLL_AFTER=$POLL_AFTER" >> $GITHUB_OUTPUT
+
+      - name: Wait and fetch results
         run: |
-          RESULT=$(curl -s "https://www.regiagents.com/api/v1/results/${{ steps.submit.outputs.ASYNC_ID }}?framework=pci" \
-            -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}")
-          STATUS=$(echo $RESULT | jq -r '.data.status')
-          SCORE=$(echo $RESULT | jq -r '.data.results.complianceScore // "N/A"')
-          FINDINGS=$(echo $RESULT | jq -r '.data.results.findings | length')
+          ASYNC_ID="${{ steps.submit.outputs.ASYNC_ID }}"
+          POLL_AFTER="${{ steps.submit.outputs.POLL_AFTER }}"
+          MAX_ATTEMPTS=20
+          SLEEP_SEC=15
+
+          echo "Waiting ${POLL_AFTER}s before first poll..."
+          sleep "$POLL_AFTER"
+
+          STATUS=""
+          RESULT=""
+
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            RESULT=$(curl -sf "https://www.regiagents.com/api/v1/results/${ASYNC_ID}?framework=pci" \
+              -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}")
+
+            if [[ $? -ne 0 ]]; then
+              echo "::warning::Attempt $i: curl failed, retrying in ${SLEEP_SEC}s..."
+              sleep $SLEEP_SEC
+              continue
+            fi
+
+            STATUS=$(echo "$RESULT" | jq -r '.data.status')
+
+            if [[ "$STATUS" == "completed" || "$STATUS" == "failed" ]]; then
+              break
+            fi
+
+            echo "Attempt $i: status=$STATUS, retrying in ${SLEEP_SEC}s..."
+            sleep $SLEEP_SEC
+          done
+
+          if [[ "$STATUS" != "completed" ]]; then
+            echo "::error::Compliance scan did not complete (final status: $STATUS)"
+            exit 1
+          fi
+
+          SCORE=$(echo "$RESULT" | jq -r '.data.results.complianceScore // "N/A"')
+          FINDINGS=$(echo "$RESULT" | jq -r '.data.results.findings | length')
+
           echo "## Compliance Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "| | |" >> $GITHUB_STEP_SUMMARY
           echo "|-|-|" >> $GITHUB_STEP_SUMMARY
           echo "| Status | $STATUS |" >> $GITHUB_STEP_SUMMARY
           echo "| Score | $SCORE |" >> $GITHUB_STEP_SUMMARY
           echo "| Findings | $FINDINGS |" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "$SCORE" != "N/A" ]] && (( $(echo "$SCORE < 80" | bc -l) )); then
+            echo "::error::Compliance score $SCORE is below the required threshold of 80"
+            exit 1
+          fi
+
+          if [[ "$FINDINGS" -gt 0 ]]; then
+            echo "::warning::$FINDINGS compliance finding(s) detected — review the full report"
+          fi
