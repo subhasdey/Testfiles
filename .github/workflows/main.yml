@@ -70,7 +70,7 @@ jobs:
           with open('/tmp/result.json') as f:
             data = json.load(f)
 
-          # Normalize status: processed/done/complete/success → Completed
+          # Normalize status
           raw_status = str(data.get('status') or data.get('state') or 'unknown').lower()
           status_map = {'processed': 'Completed', 'done': 'Completed', 'complete': 'Completed',
                         'completed': 'Completed', 'success': 'Completed',
@@ -78,41 +78,58 @@ jobs:
                         'pending': 'Pending', 'processing': 'Processing'}
           STATUS = status_map.get(raw_status, raw_status.capitalize())
 
-          # Try to extract score and findings from multiple possible shapes:
-          # 1. .message is a stringified JSON with rule-keyed structure
-          # 2. .results or .result contains findings/score directly
           SCORE = 'N/A'
-          FINDINGS = 0
           findings_list = []
+          total_rules = 0
+          violated_rules = 0
 
-          # Shape 1: message as stringified JSON (rule-keyed: { "RULE-ID": { requirement, evaluated_matches } })
+          # Shape 1: .message is stringified JSON with rule-keyed structure
+          # { "RULE-ID": { requirement, evaluated_matches: [{issue_summary, fix_summary, filename, ...}] } }
           message = data.get('message', '')
           if isinstance(message, str) and message.strip().startswith('{'):
             try:
               msg = json.loads(message)
-              for key, val in msg.items():
-                if isinstance(val, dict):
-                  matches = val.get('evaluated_matches') or []
-                  for m in matches:
-                    cstatus = str(m.get('compliance_status', '')).lower()
-                    if cstatus in ('non-compliant', 'violation', 'fail', 'failed', 'non_compliant'):
-                      findings_list.append(m)
+              for rule_id, val in msg.items():
+                if not isinstance(val, dict):
+                  continue
+                total_rules += 1
+                matches = val.get('evaluated_matches') or []
+                rule_has_violation = False
+                for m in matches:
+                  if not isinstance(m, dict):
+                    continue
+                  issue = m.get('issue_summary') or m.get('issue') or ''
+                  fix   = m.get('fix_summary')   or m.get('fix')   or ''
+                  # A match is a finding if it has an issue description
+                  if issue:
+                    rule_has_violation = True
+                    findings_list.append({
+                      'rule':    rule_id,
+                      'message': issue,
+                      'fix':     fix,
+                      'file':    m.get('filename', ''),
+                      'lines':   m.get('code_lines', ''),
+                    })
+                if rule_has_violation:
+                  violated_rules += 1
+              # Score: % of rules that are compliant
+              if total_rules > 0:
+                compliant_pct = round(((total_rules - violated_rules) / total_rules) * 100)
+                SCORE = f'{compliant_pct}%'
               if 'complianceScore' in msg:
                 SCORE = msg['complianceScore']
-              elif 'compliance_score' in msg:
-                SCORE = msg['compliance_score']
             except Exception as e:
               print(f'::warning::Could not parse message JSON: {e}')
 
           # Shape 2: top-level or nested results/result/data
-          results = data.get('results') or data.get('result') or data.get('data') or {}
-          if isinstance(results, dict):
-            if not findings_list:
+          if not findings_list:
+            results = data.get('results') or data.get('result') or data.get('data') or {}
+            if isinstance(results, dict):
               raw_findings = results.get('findings') or results.get('issues') or []
               if isinstance(raw_findings, list):
                 findings_list = raw_findings
-            if SCORE == 'N/A':
-              SCORE = results.get('complianceScore') or results.get('compliance_score') or 'N/A'
+              if SCORE == 'N/A':
+                SCORE = results.get('complianceScore') or results.get('compliance_score') or 'N/A'
 
           # Shape 3: top-level findings/score
           if not findings_list:
@@ -123,29 +140,34 @@ jobs:
             SCORE = data.get('complianceScore') or data.get('compliance_score') or 'N/A'
 
           FINDINGS = len(findings_list)
-
-          print(f'Status: {STATUS} | Score: {SCORE} | Findings: {FINDINGS}')
+          print(f'Status: {STATUS} | Score: {SCORE} | Findings: {FINDINGS} | Rules checked: {total_rules}')
 
           summary = os.environ.get('GITHUB_STEP_SUMMARY', '')
           if summary:
             with open(summary, 'a') as f:
               f.write('## Compliance Scan Results\n')
               f.write('| | |\n|-|-|\n')
-              f.write(f'| Status   | {STATUS} |\n')
-              f.write(f'| Score    | {SCORE} |\n')
-              f.write(f'| Findings | {FINDINGS} |\n')
+              f.write(f'| Status        | {STATUS} |\n')
+              f.write(f'| Score         | {SCORE} |\n')
+              f.write(f'| Rules Checked | {total_rules} |\n')
+              f.write(f'| Violations    | {FINDINGS} |\n')
               if FINDINGS > 0:
-                f.write('\n### Findings\n')
-                for i, finding in enumerate(findings_list[:10], 1):
+                f.write('\n### Violations\n')
+                for i, finding in enumerate(findings_list[:15], 1):
                   if isinstance(finding, dict):
-                    msg = finding.get('message') or finding.get('description') or finding.get('issue') or str(finding)
-                    sev = finding.get('severity') or finding.get('level') or ''
-                    sev_str = f' `{sev}`' if sev else ''
-                    f.write(f'{i}. {msg}{sev_str}\n')
-                if FINDINGS > 10:
-                  f.write(f'\n_...and {FINDINGS - 10} more findings._\n')
+                    rule = finding.get('rule', '')
+                    msg  = finding.get('message', '')
+                    fix  = finding.get('fix', '')
+                    file_info = finding.get('file', '')
+                    lines = finding.get('lines', '')
+                    loc = f' — `{file_info}` lines {lines}' if file_info else ''
+                    f.write(f'\n**{i}. `{rule}`**{loc}\n')
+                    f.write(f'- **Issue:** {msg}\n')
+                    if fix:
+                      f.write(f'- **Fix:** {fix}\n')
+                if FINDINGS > 15:
+                  f.write(f'\n_...and {FINDINGS - 15} more violations._\n')
 
-          # Exit non-zero if failed
           if STATUS == 'Failed':
             sys.exit(1)
           PYEOF
