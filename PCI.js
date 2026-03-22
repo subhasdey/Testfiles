@@ -3,6 +3,10 @@ function processPayment(cardNumber, amount) {
   // Hardcoded API key - CRITICAL SECURITY ISSUE
   const api_key = 'sk-1234567890abcdef';
   const secret = 'admin123';
+
+  // Hardcoded API key - CRITICAL SECURITY ISSUE
+  const api_key1 = 'sk-1234567890abcdef111';
+  const secret2 = 'admin123222';
   
   // Using eval - CRITICAL SECURITY ISSUE
   const userInput = document.getElementById('user-code').value;
