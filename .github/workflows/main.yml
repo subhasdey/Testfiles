@@ -66,8 +66,6 @@ jobs:
 
       - name: Parse and summarize results
         run: |
-          # Write Python parser — all lines indented 10 spaces to satisfy YAML,
-          # then sed strips that prefix so Python gets correct indentation.
           cat > /tmp/parse_results.py << 'PYEOF'
           import json, sys, os
 
@@ -201,6 +199,4 @@ jobs:
               sys.exit(1)
           PYEOF
 
-          # Strip the 10-space YAML indentation prefix so Python sees correct indentation
-          sed -i 's/^          //' /tmp/parse_results.py
           python3 /tmp/parse_results.py
