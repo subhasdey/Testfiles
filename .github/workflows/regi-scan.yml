@@ -1,0 +1,159 @@
+name: Regi Compliance Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  compliance-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Submit compliance analysis
+        id: submit
+        run: |
+          ASYNC_ID="async-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          HTTP_CODE=$(curl -sL -o /tmp/response.json -w "%{http_code}" \
+            -X POST "https://www.regiagents.com/api/v1/analyze" \
+            -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"framework\": \"pci\",
+              \"git_url\": \"https://github.com/subhasdey/Testfiles\",
+              \"branch\": \"${{ github.ref_name }}\",
+              \"language\": \"javascript\"
+            }")
+
+          echo "Submit HTTP status: $HTTP_CODE"
+          cat /tmp/response.json
+
+          if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
+            echo "::error::Submission failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          RETURNED_ID=$(cat /tmp/response.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('async_id',''))" 2>/dev/null || echo "")
+          if [ -n "$RETURNED_ID" ]; then
+            ASYNC_ID="$RETURNED_ID"
+          fi
+
+          echo "ASYNC_ID=$ASYNC_ID" >> $GITHUB_OUTPUT
+
+      - name: Poll for results
+        run: |
+          ASYNC_ID="${{ steps.submit.outputs.ASYNC_ID }}"
+          API_URL="https://www.regiagents.com/api/v1/results/${ASYNC_ID}"
+          AUTH="Authorization: Bearer ${{ secrets.REGI_API_KEY }}"
+
+          echo "⏳ Waiting 120s before first poll..."
+          sleep 120
+
+          MAX_ATTEMPTS=20
+          INTERVAL=30
+          ATTEMPT=1
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "🔄 Poll attempt $ATTEMPT/$MAX_ATTEMPTS"
+
+            HTTP_CODE=$(curl -sL -o /tmp/result.json -w "%{http_code}" \
+              -X GET "$API_URL" \
+              -H "$AUTH")
+
+            echo "   HTTP status: $HTTP_CODE"
+
+            if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
+              echo "::warning::Poll returned HTTP $HTTP_CODE — retrying"
+              sleep $INTERVAL
+              ATTEMPT=$((ATTEMPT + 1))
+              continue
+            fi
+
+            # Check if analysis is done
+            STATUS=$(cat /tmp/result.json | python3 -c "
+          import sys, json
+          raw = json.load(sys.stdin)
+          data = raw.get('data', raw) if isinstance(raw, dict) else raw
+          print(data.get('status', 'unknown'))
+          " 2>/dev/null || echo "unknown")
+
+            echo "   Analysis status: $STATUS"
+
+            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+              echo "✅ Analysis finished with status: $STATUS"
+              cat /tmp/result.json
+              break
+            fi
+
+            echo "   Still processing — waiting ${INTERVAL}s..."
+            sleep $INTERVAL
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+
+          if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+            echo "::error::Analysis did not complete after $MAX_ATTEMPTS poll attempts ($(( MAX_ATTEMPTS * INTERVAL + 120 ))s total)"
+            cat /tmp/result.json
+            exit 1
+          fi
+
+      - name: Parse and summarize results
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys, os
+
+          def normalize_status(raw):
+              s = str(raw or 'unknown').lower()
+              mapping = {
+                  'processed': 'Completed', 'done': 'Completed',
+                  'complete': 'Completed', 'completed': 'Completed', 'success': 'Completed',
+                  'failed': 'Failed', 'error': 'Failed',
+                  'pending': 'Pending', 'processing': 'Processing',
+              }
+              return mapping.get(s, s.capitalize())
+
+          with open('/tmp/result.json') as fh:
+              raw = json.load(fh)
+
+          # Unwrap the API envelope: { ok, data: { ... }, meta }
+          data = raw.get('data', raw) if isinstance(raw, dict) else raw
+
+          status = normalize_status(data.get('status') or data.get('state'))
+          results = data.get('results') or data.get('result') or {}
+          if not isinstance(results, dict):
+              results = {}
+          findings = results.get('findings') or data.get('findings') or []
+          score = str(results.get('complianceScore') or data.get('complianceScore') or 'N/A')
+
+          print(f'Status={status} | Score={score} | Violations={len(findings)}')
+
+          summary_path = os.environ.get('GITHUB_STEP_SUMMARY', '')
+          if not summary_path:
+              sys.exit(0)
+
+          out = []
+          out.append('## Regi Compliance Scan Results\n\n')
+          out.append('| Field | Value |\n|---|---|\n')
+          out.append(f'| **Status** | {status} |\n')
+          out.append(f'| **Compliance Score** | {score} |\n')
+          out.append(f'| **Violations Found** | {len(findings)} |\n')
+
+          if findings:
+              out.append('\n### Violations\n\n')
+              for i, f in enumerate(findings[:20], 1):
+                  if isinstance(f, dict):
+                      msg = f.get('message') or f.get('issue') or str(f)
+                      rec = f.get('recommendation') or f.get('fix') or ''
+                      out.append(f'{i}. {msg}')
+                      if rec:
+                          out.append(f'   - *Fix:* {rec}')
+                      out.append('\n')
+          else:
+              out.append('\n> ✅ No violations found.\n')
+
+          with open(summary_path, 'w') as fh:
+              fh.writelines(out)
+          PYEOF
