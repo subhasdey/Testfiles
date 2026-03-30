@@ -40,66 +40,21 @@ jobs:
           fi
           echo "ASYNC_ID=$ASYNC_ID" >> $GITHUB_OUTPUT
 
-      - name: Poll for results
+      - name: Wait for analysis to complete
+        run: sleep 60
+
+      - name: Fetch results
         run: |
           ASYNC_ID="${{ steps.submit.outputs.ASYNC_ID }}"
-          echo "Waiting 60s before first poll..."
-          sleep 60
-
-          MAX_ATTEMPTS=20
-          INTERVAL=30
-          ATTEMPT=1
-
-          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            echo "Poll attempt $ATTEMPT/$MAX_ATTEMPTS"
-            HTTP_CODE=$(curl -s -o /tmp/result.json -w "%{http_code}" \
-              -X GET "${BACKEND_URL}/results/${ASYNC_ID}")
-            echo "  HTTP status: $HTTP_CODE"
-
-            if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
-              echo "::warning::Poll returned HTTP $HTTP_CODE, retrying"
-              sleep $INTERVAL
-              ATTEMPT=$((ATTEMPT + 1))
-              continue
-            fi
-
-            STATUS=$(cat /tmp/result.json | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-s = str(d.get('status', d.get('state', 'unknown'))).lower()
-msg = d.get('message', '')
-if isinstance(msg, str) and msg.strip().startswith('{'):
-    try:
-        parsed = json.loads(msg)
-        if any(isinstance(v, dict) and 'evaluated_matches' in v for v in parsed.values()):
-            s = 'processed'
-    except: pass
-print(s)
-" 2>/dev/null || echo "unknown")
-
-            echo "  Analysis status: $STATUS"
-
-            case "$STATUS" in
-              completed|processed|done|success)
-                echo "Analysis finished with status: $STATUS"
-                cat /tmp/result.json
-                break ;;
-              failed|error)
-                echo "Analysis failed"
-                cat /tmp/result.json
-                break ;;
-            esac
-
-            echo "  Still processing, waiting ${INTERVAL}s..."
-            sleep $INTERVAL
-            ATTEMPT=$((ATTEMPT + 1))
-          done
-
-          if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-            echo "::error::Analysis did not complete after $MAX_ATTEMPTS attempts"
-            cat /tmp/result.json
+          HTTP_CODE=$(curl -s -o /tmp/result.json -w "%{http_code}" \
+            -X GET "${BACKEND_URL}/results/${ASYNC_ID}")
+          echo "HTTP status: $HTTP_CODE"
+          cat /tmp/result.json
+          if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
+            echo "::error::Failed to fetch results with HTTP $HTTP_CODE"
             exit 1
           fi
+          echo "Parsing results..."
 
       - name: Parse and summarize results
         run: |
