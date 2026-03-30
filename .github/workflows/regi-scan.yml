@@ -24,7 +24,7 @@ jobs:
             -X POST "${BACKEND_URL}/analyze-async" \
             -H "Content-Type: application/json" \
             -d "{
-              \"git_url\": \"https://github.com/${{ github.repository }}\",
+              \"git_url\": \"https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}\",
               \"branch\": \"${{ github.ref_name }}\",
               \"language\": \"javascript\",
               \"sector_name\": \"Payment Card Industry\",
@@ -118,6 +118,7 @@ jobs:
           
           def extract_from_rule_keyed(rule_dict):
               findings = []
+              all_files = set()
               total = 0
               violated = 0
               for rule_id, val in rule_dict.items():
@@ -128,6 +129,9 @@ jobs:
                   for match in (val.get("evaluated_matches") or []):
                       if not isinstance(match, dict):
                           continue
+                      fname = match.get("filename", "")
+                      if fname:
+                          all_files.add(fname)
                       issue = match.get("issue_summary") or match.get("issue") or ""
                       fix   = match.get("fix_summary")   or match.get("fix")   or ""
                       if issue:
@@ -136,29 +140,30 @@ jobs:
                               "rule":  rule_id,
                               "issue": issue,
                               "fix":   fix,
-                              "file":  match.get("filename", ""),
+                              "file":  fname,
                               "lines": match.get("code_lines", ""),
                           })
                   if rule_violated:
                       violated += 1
               score = f"{round(((total - violated) / total) * 100)}%" if total > 0 else "N/A"
-              return findings, total, violated, score
+              return findings, total, violated, score, sorted(all_files)
           
           with open("/tmp/result.json") as fh:
               data = json.load(fh)
           
           status     = normalize_status(data.get("status") or data.get("state"))
-          findings   = []
-          total_rules = 0
+          findings       = []
+          reviewed_files = []
+          total_rules    = 0
           violated_rules = 0
-          score      = "N/A"
+          score          = "N/A"
           
           # Shape 1: results in .message as stringified rule-keyed JSON
           message_raw = data.get("message", "")
           if isinstance(message_raw, str) and message_raw.strip().startswith("{"):
               try:
                   message_json = json.loads(message_raw)
-                  findings, total_rules, violated_rules, score = extract_from_rule_keyed(message_json)
+                  findings, total_rules, violated_rules, score, reviewed_files = extract_from_rule_keyed(message_json)
                   if "complianceScore" in message_json:
                       score = str(message_json["complianceScore"])
               except Exception as exc:
@@ -199,6 +204,16 @@ jobs:
           out.append(f"| **Compliance Score** | {score} |\n")
           out.append(f"| **Rules Checked** | {total_rules} |\n")
           out.append(f"| **Violations Found** | {total_findings} |\n")
+          out.append(f"| **Files Reviewed** | {len(reviewed_files)} |\n")
+          
+          if not reviewed_files:
+              print("::warning::No files were identified in the analysis — the repository may not have been accessible", file=sys.stderr)
+          
+          if reviewed_files:
+              out.append("\n---\n\n")
+              out.append("### Files Reviewed\n\n")
+              for f in reviewed_files:
+                  out.append(f"- `{f}`\n")
           
           if total_findings > 0:
               out.append("\n---\n\n")
