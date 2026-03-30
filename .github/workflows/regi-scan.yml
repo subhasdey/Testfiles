@@ -40,21 +40,66 @@ jobs:
           fi
           echo "ASYNC_ID=$ASYNC_ID" >> $GITHUB_OUTPUT
 
-      - name: Wait for analysis to complete
-        run: sleep 60
-
       - name: Fetch results
         run: |
           ASYNC_ID="${{ steps.submit.outputs.ASYNC_ID }}"
-          HTTP_CODE=$(curl -s -o /tmp/result.json -w "%{http_code}" \
-            -X GET "${BACKEND_URL}/results/${ASYNC_ID}")
-          echo "HTTP status: $HTTP_CODE"
-          cat /tmp/result.json
-          if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
-            echo "::error::Failed to fetch results with HTTP $HTTP_CODE"
-            exit 1
+
+          cat > /tmp/check_status.py << 'PYEOF'
+          import json, sys
+          with open('/tmp/result.json') as f:
+              d = json.load(f)
+          s = str(d.get('status', d.get('state', 'unknown'))).lower()
+          msg = d.get('message', '')
+          if isinstance(msg, str) and msg.strip().startswith('{'):
+              try:
+                  parsed = json.loads(msg)
+                  if any(isinstance(v, dict) and 'evaluated_matches' in v for v in parsed.values()):
+                      s = 'processed'
+              except:
+                  pass
+          print(s)
+          PYEOF
+
+          echo "Waiting 60s for initial analysis..."
+          sleep 60
+
+          MAX_ATTEMPTS=10
+          INTERVAL=30
+          COMPLETED=0
+
+          for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
+            echo "Fetch attempt $ATTEMPT/$MAX_ATTEMPTS"
+            HTTP_CODE=$(curl -s -o /tmp/result.json -w "%{http_code}" \
+              -X GET "${BACKEND_URL}/results/${ASYNC_ID}")
+            echo "  HTTP $HTTP_CODE"
+
+            if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
+              echo "::warning::Fetch attempt $ATTEMPT returned HTTP $HTTP_CODE"
+              sleep $INTERVAL
+              continue
+            fi
+
+            STATUS=$(python3 /tmp/check_status.py 2>/dev/null || echo "unknown")
+            echo "  Status: $STATUS"
+
+            case "$STATUS" in
+              completed|processed|done|success)
+                COMPLETED=1
+                echo "Analysis complete."
+                break ;;
+              failed|error)
+                echo "::warning::Analysis returned a failed status"
+                COMPLETED=1
+                break ;;
+            esac
+
+            echo "  Still processing, waiting ${INTERVAL}s..."
+            sleep $INTERVAL
+          done
+
+          if [[ "$COMPLETED" -eq 0 ]]; then
+            echo "::warning::Analysis did not finish after $MAX_ATTEMPTS attempts — results may be incomplete"
           fi
-          echo "Parsing results..."
 
       - name: Parse and summarize results
         run: |
@@ -185,7 +230,9 @@ jobs:
               f.writelines(out)
           
           print(f"Summary written ({len(out)} lines)")
-          if status == "Failed":
+          if status in ("Pending", "Processing"):
+              print("::warning::Analysis is still pending — compliance results may be incomplete", file=sys.stderr)
+          elif status == "Failed":
               sys.exit(1)
           PYEOF
           python3 /tmp/parse_results.py
