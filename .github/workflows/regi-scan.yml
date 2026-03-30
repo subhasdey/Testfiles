@@ -158,18 +158,32 @@ jobs:
           violated_rules = 0
           score          = "N/A"
           
-          # Shape 1: results in .message as stringified rule-keyed JSON
-          message_raw = data.get("message", "")
-          if isinstance(message_raw, str) and message_raw.strip().startswith("{"):
-              try:
-                  message_json = json.loads(message_raw)
-                  findings, total_rules, violated_rules, score, reviewed_files = extract_from_rule_keyed(message_json)
-                  if "complianceScore" in message_json:
-                      score = str(message_json["complianceScore"])
-              except Exception as exc:
-                  print(f"::warning::Could not parse message JSON: {exc}", file=sys.stderr)
+          # Shape 0: rule-keyed data at the top level (e.g. {"PCI-DSS-3.3": {"evaluated_matches": [...]}, "status": "completed"})
+          # extract_from_rule_keyed silently skips non-dict values like status/job_id strings
+          findings, total_rules, violated_rules, score, reviewed_files = extract_from_rule_keyed(data)
           
-          # Shape 2: nested results/result/data object
+          # Shape 1: rule-keyed data inside .message as a stringified JSON string
+          if not findings:
+              message_raw = data.get("message", "")
+              if isinstance(message_raw, str) and message_raw.strip().startswith("{"):
+                  try:
+                      message_json = json.loads(message_raw)
+                      findings, total_rules, violated_rules, score, reviewed_files = extract_from_rule_keyed(message_json)
+                      if "complianceScore" in message_json:
+                          score = str(message_json["complianceScore"])
+                  except Exception as exc:
+                      print(f"::warning::Could not parse message JSON: {exc}", file=sys.stderr)
+          
+          # Shape 2: rule-keyed data nested under result/data/output
+          if not findings:
+              for _key in ("result", "data", "output"):
+                  _nested = data.get(_key)
+                  if isinstance(_nested, dict):
+                      findings, total_rules, violated_rules, score, reviewed_files = extract_from_rule_keyed(_nested)
+                      if findings:
+                          break
+          
+          # Shape 3: flat findings/issues list nested under results/result/data
           if not findings:
               nested = data.get("results") or data.get("result") or data.get("data") or {}
               if isinstance(nested, dict):
@@ -179,7 +193,7 @@ jobs:
                   if score == "N/A":
                       score = str(nested.get("complianceScore") or nested.get("compliance_score") or "N/A")
           
-          # Shape 3: top-level findings
+          # Shape 4: top-level findings list
           if not findings:
               raw = data.get("findings") or []
               if isinstance(raw, list):
