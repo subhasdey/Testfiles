@@ -10,150 +10,227 @@ on:
 jobs:
   compliance-scan:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      BACKEND_URL: ${{ secrets.BACKEND_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Submit compliance analysis
         id: submit
         run: |
           ASYNC_ID="async-${{ github.run_id }}-${{ github.run_attempt }}"
-
-          HTTP_CODE=$(curl -sL -o /tmp/response.json -w "%{http_code}" \
-            -X POST "https://www.regiagents.com/api/v1/analyze" \
-            -H "Authorization: Bearer ${{ secrets.REGI_API_KEY }}" \
+          HTTP_CODE=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "${BACKEND_URL}/analyze-async" \
             -H "Content-Type: application/json" \
             -d "{
-              \"framework\": \"pci\",
-              \"git_url\": \"https://github.com/subhasdey/Testfiles\",
+              \"git_url\": \"https://github.com/${{ github.repository }}\",
               \"branch\": \"${{ github.ref_name }}\",
-              \"language\": \"javascript\"
+              \"language\": \"javascript\",
+              \"sector_name\": \"Payment Card Industry\",
+              \"sector_framework\": \"PCI DSS\",
+              \"level\": \"LEVEL_1\",
+              \"async_id\": \"${ASYNC_ID}\"
             }")
-
           echo "Submit HTTP status: $HTTP_CODE"
           cat /tmp/response.json
-
           if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
             echo "::error::Submission failed with HTTP $HTTP_CODE"
             exit 1
           fi
-
-          RETURNED_ID=$(cat /tmp/response.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('async_id',''))" 2>/dev/null || echo "")
-          if [ -n "$RETURNED_ID" ]; then
-            ASYNC_ID="$RETURNED_ID"
-          fi
-
           echo "ASYNC_ID=$ASYNC_ID" >> $GITHUB_OUTPUT
 
       - name: Poll for results
         run: |
           ASYNC_ID="${{ steps.submit.outputs.ASYNC_ID }}"
-          API_URL="https://www.regiagents.com/api/v1/results/${ASYNC_ID}"
-          AUTH="Authorization: Bearer ${{ secrets.REGI_API_KEY }}"
-
-          echo "⏳ Waiting 120s before first poll..."
-          sleep 120
+          echo "Waiting 60s before first poll..."
+          sleep 60
 
           MAX_ATTEMPTS=20
           INTERVAL=30
           ATTEMPT=1
 
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            echo "🔄 Poll attempt $ATTEMPT/$MAX_ATTEMPTS"
-
-            HTTP_CODE=$(curl -sL -o /tmp/result.json -w "%{http_code}" \
-              -X GET "$API_URL" \
-              -H "$AUTH")
-
-            echo "   HTTP status: $HTTP_CODE"
+            echo "Poll attempt $ATTEMPT/$MAX_ATTEMPTS"
+            HTTP_CODE=$(curl -s -o /tmp/result.json -w "%{http_code}" \
+              -X GET "${BACKEND_URL}/results/${ASYNC_ID}")
+            echo "  HTTP status: $HTTP_CODE"
 
             if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
-              echo "::warning::Poll returned HTTP $HTTP_CODE — retrying"
+              echo "::warning::Poll returned HTTP $HTTP_CODE, retrying"
               sleep $INTERVAL
               ATTEMPT=$((ATTEMPT + 1))
               continue
             fi
 
-            # Check if analysis is done
             STATUS=$(cat /tmp/result.json | python3 -c "
-          import sys, json
-          raw = json.load(sys.stdin)
-          data = raw.get('data', raw) if isinstance(raw, dict) else raw
-          print(data.get('status', 'unknown'))
-          " 2>/dev/null || echo "unknown")
+import sys, json
+d = json.load(sys.stdin)
+s = str(d.get('status', d.get('state', 'unknown'))).lower()
+msg = d.get('message', '')
+if isinstance(msg, str) and msg.strip().startswith('{'):
+    try:
+        parsed = json.loads(msg)
+        if any(isinstance(v, dict) and 'evaluated_matches' in v for v in parsed.values()):
+            s = 'processed'
+    except: pass
+print(s)
+" 2>/dev/null || echo "unknown")
 
-            echo "   Analysis status: $STATUS"
+            echo "  Analysis status: $STATUS"
 
-            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
-              echo "✅ Analysis finished with status: $STATUS"
-              cat /tmp/result.json
-              break
-            fi
+            case "$STATUS" in
+              completed|processed|done|success)
+                echo "Analysis finished with status: $STATUS"
+                cat /tmp/result.json
+                break ;;
+              failed|error)
+                echo "Analysis failed"
+                cat /tmp/result.json
+                break ;;
+            esac
 
-            echo "   Still processing — waiting ${INTERVAL}s..."
+            echo "  Still processing, waiting ${INTERVAL}s..."
             sleep $INTERVAL
             ATTEMPT=$((ATTEMPT + 1))
           done
 
           if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-            echo "::error::Analysis did not complete after $MAX_ATTEMPTS poll attempts ($(( MAX_ATTEMPTS * INTERVAL + 120 ))s total)"
+            echo "::error::Analysis did not complete after $MAX_ATTEMPTS attempts"
             cat /tmp/result.json
             exit 1
           fi
 
       - name: Parse and summarize results
         run: |
-          python3 - <<'PYEOF'
+          cat > /tmp/parse_results.py << 'PYEOF'
           import json, sys, os
-
+          
           def normalize_status(raw):
-              s = str(raw or 'unknown').lower()
+              s = str(raw or "unknown").lower()
               mapping = {
-                  'processed': 'Completed', 'done': 'Completed',
-                  'complete': 'Completed', 'completed': 'Completed', 'success': 'Completed',
-                  'failed': 'Failed', 'error': 'Failed',
-                  'pending': 'Pending', 'processing': 'Processing',
+                  "processed": "Completed", "done": "Completed",
+                  "complete": "Completed", "completed": "Completed", "success": "Completed",
+                  "failed": "Failed", "error": "Failed",
+                  "pending": "Pending", "processing": "Processing",
               }
               return mapping.get(s, s.capitalize())
-
-          with open('/tmp/result.json') as fh:
-              raw = json.load(fh)
-
-          # Unwrap the API envelope: { ok, data: { ... }, meta }
-          data = raw.get('data', raw) if isinstance(raw, dict) else raw
-
-          status = normalize_status(data.get('status') or data.get('state'))
-          results = data.get('results') or data.get('result') or {}
-          if not isinstance(results, dict):
-              results = {}
-          findings = results.get('findings') or data.get('findings') or []
-          score = str(results.get('complianceScore') or data.get('complianceScore') or 'N/A')
-
-          print(f'Status={status} | Score={score} | Violations={len(findings)}')
-
-          summary_path = os.environ.get('GITHUB_STEP_SUMMARY', '')
+          
+          def extract_from_rule_keyed(rule_dict):
+              findings = []
+              total = 0
+              violated = 0
+              for rule_id, val in rule_dict.items():
+                  if not isinstance(val, dict):
+                      continue
+                  total += 1
+                  rule_violated = False
+                  for match in (val.get("evaluated_matches") or []):
+                      if not isinstance(match, dict):
+                          continue
+                      issue = match.get("issue_summary") or match.get("issue") or ""
+                      fix   = match.get("fix_summary")   or match.get("fix")   or ""
+                      if issue:
+                          rule_violated = True
+                          findings.append({
+                              "rule":  rule_id,
+                              "issue": issue,
+                              "fix":   fix,
+                              "file":  match.get("filename", ""),
+                              "lines": match.get("code_lines", ""),
+                          })
+                  if rule_violated:
+                      violated += 1
+              score = f"{round(((total - violated) / total) * 100)}%" if total > 0 else "N/A"
+              return findings, total, violated, score
+          
+          with open("/tmp/result.json") as fh:
+              data = json.load(fh)
+          
+          status     = normalize_status(data.get("status") or data.get("state"))
+          findings   = []
+          total_rules = 0
+          violated_rules = 0
+          score      = "N/A"
+          
+          # Shape 1: results in .message as stringified rule-keyed JSON
+          message_raw = data.get("message", "")
+          if isinstance(message_raw, str) and message_raw.strip().startswith("{"):
+              try:
+                  message_json = json.loads(message_raw)
+                  findings, total_rules, violated_rules, score = extract_from_rule_keyed(message_json)
+                  if "complianceScore" in message_json:
+                      score = str(message_json["complianceScore"])
+              except Exception as exc:
+                  print(f"::warning::Could not parse message JSON: {exc}", file=sys.stderr)
+          
+          # Shape 2: nested results/result/data object
+          if not findings:
+              nested = data.get("results") or data.get("result") or data.get("data") or {}
+              if isinstance(nested, dict):
+                  raw = nested.get("findings") or nested.get("issues") or []
+                  if isinstance(raw, list):
+                      findings = raw
+                  if score == "N/A":
+                      score = str(nested.get("complianceScore") or nested.get("compliance_score") or "N/A")
+          
+          # Shape 3: top-level findings
+          if not findings:
+              raw = data.get("findings") or []
+              if isinstance(raw, list):
+                  findings = raw
+          
+          if score == "N/A":
+              score = str(data.get("complianceScore") or data.get("compliance_score") or "N/A")
+          
+          total_findings = len(findings)
+          print(f"Status={status} | Score={score} | Rules={total_rules} | Violations={total_findings}")
+          
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
           if not summary_path:
+              print("::warning::GITHUB_STEP_SUMMARY not set", file=sys.stderr)
               sys.exit(0)
-
+          
           out = []
-          out.append('## Regi Compliance Scan Results\n\n')
-          out.append('| Field | Value |\n|---|---|\n')
-          out.append(f'| **Status** | {status} |\n')
-          out.append(f'| **Compliance Score** | {score} |\n')
-          out.append(f'| **Violations Found** | {len(findings)} |\n')
-
-          if findings:
-              out.append('\n### Violations\n\n')
-              for i, f in enumerate(findings[:20], 1):
-                  if isinstance(f, dict):
-                      msg = f.get('message') or f.get('issue') or str(f)
-                      rec = f.get('recommendation') or f.get('fix') or ''
-                      out.append(f'{i}. {msg}')
-                      if rec:
-                          out.append(f'   - *Fix:* {rec}')
-                      out.append('\n')
+          out.append("## Compliance Scan Results\n\n")
+          out.append("| Field | Value |\n")
+          out.append("|---|---|\n")
+          out.append(f"| **Status** | {status} |\n")
+          out.append(f"| **Compliance Score** | {score} |\n")
+          out.append(f"| **Rules Checked** | {total_rules} |\n")
+          out.append(f"| **Violations Found** | {total_findings} |\n")
+          
+          if total_findings > 0:
+              out.append("\n---\n\n")
+              out.append("### Violation Details\n\n")
+              for idx, finding in enumerate(findings[:20], 1):
+                  if isinstance(finding, dict):
+                      rule      = finding.get("rule", "Unknown rule")
+                      issue_txt = finding.get("issue") or finding.get("message") or ""
+                      fix_txt   = finding.get("fix") or finding.get("recommendation") or ""
+                      file_name = finding.get("file", "")
+                      code_lines = finding.get("lines", "")
+                      loc_str   = f"`{file_name}` lines {code_lines}" if file_name else ""
+                  else:
+                      rule, issue_txt, fix_txt, loc_str = str(finding), "", "", ""
+                  out.append(f"#### {idx}. `{rule}`\n\n")
+                  if loc_str:
+                      out.append(f"- **File:** {loc_str}\n")
+                  if issue_txt:
+                      out.append(f"- **Issue:** {issue_txt}\n")
+                  if fix_txt:
+                      out.append(f"- **Fix:** {fix_txt}\n")
+                  out.append("\n")
+              if total_findings > 20:
+                  out.append(f"> *{total_findings - 20} more violations not shown.*\n")
           else:
-              out.append('\n> ✅ No violations found.\n')
-
-          with open(summary_path, 'w') as fh:
-              fh.writelines(out)
+              out.append("\n> No violations found. Repository is compliant.\n")
+          
+          with open(summary_path, "w") as f:
+              f.writelines(out)
+          
+          print(f"Summary written ({len(out)} lines)")
+          if status == "Failed":
+              sys.exit(1)
           PYEOF
+          python3 /tmp/parse_results.py
