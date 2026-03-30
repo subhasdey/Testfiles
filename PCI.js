@@ -1,7 +1,6 @@
 function processPayment(cardNumber, amount) {
   const api_key = 'sk-1234567890abcdef';
   const secret = 'admin123';
-
   const api_key1 = 'sk-1234567890abcdef111';
   const secret2 = 'admin123222';
 
