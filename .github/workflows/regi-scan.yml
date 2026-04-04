@@ -12,35 +12,84 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-      BACKEND_URL: ${{ secrets.BACKEND_URL }}
     steps:
       - uses: actions/checkout@v4.2.2
 
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.BACKEND_URL }}" ]; then
+            echo "::error::BACKEND_URL secret is not set."
+            echo "::error::Go to repo Settings → Secrets and variables → Actions → New repository secret"
+            echo "::error::Name: BACKEND_URL"
+            echo "::error::Value: https://regi-backend-service-226630681778.us-central1.run.app"
+            exit 1
+          fi
+
+      - name: Detect primary language
+        id: detect_lang
+        run: |
+          RAW_LANG=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/languages" \
+            | python3 -c "
+          import json, sys
+          langs = json.load(sys.stdin)
+          mapping = {
+            "Python": "python",
+            "JavaScript": "javascript",
+            "TypeScript": "javascript",
+            "Java": "java",
+            "Go": "javascript",
+            "Ruby": "javascript",
+          }
+          top = max(langs, key=langs.get) if langs else "JavaScript"
+          print(mapping.get(top, "javascript"))
+          ")
+          echo "Detected language: $RAW_LANG"
+          echo "LANGUAGE=$RAW_LANG" >> $GITHUB_OUTPUT
+
       - name: Submit compliance analysis
         id: submit
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
         run: |
           ASYNC_ID="async-${{ github.run_id }}-${{ github.run_attempt }}"
+          LANGUAGE="${{ steps.detect_lang.outputs.LANGUAGE }}"
+
+          # Write payload to temp file to avoid shell escaping issues
+          python3 - << 'PYEOF'
+          import json, os
+          payload = {
+            "git_url":          "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}",
+            "branch":           "${{ github.ref_name }}",
+            "language":         os.environ.get("LANGUAGE", "javascript"),
+            "sector_name":      "Payment Card Industry",
+            "sector_framework": "PCI DSS",
+            "level":            "LEVEL_1",
+            "async_id":         "async-${{ github.run_id }}-${{ github.run_attempt }}",
+          }
+          with open("/tmp/payload.json", "w") as f:
+            json.dump(payload, f)
+          PYEOF
+
           HTTP_CODE=$(curl -s -o /tmp/response.json -w "%{http_code}" \
             -X POST "${BACKEND_URL}/analyze-async" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"git_url\": \"https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}\",
-              \"branch\": \"${{ github.ref_name }}\",
-              \"language\": \"javascript\",
-              \"sector_name\": \"Payment Card Industry\",
-              \"sector_framework\": \"PCI DSS\",
-              \"level\": \"LEVEL_1\",
-              \"async_id\": \"${ASYNC_ID}\"
-            }")
+            -d @/tmp/payload.json)
+
           echo "Submit HTTP status: $HTTP_CODE"
           cat /tmp/response.json
+
           if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
-            echo "::error::Submission failed with HTTP $HTTP_CODE"
+            echo "::error::Submission failed with HTTP $HTTP_CODE — check BACKEND_URL secret"
             exit 1
           fi
           echo "ASYNC_ID=$ASYNC_ID" >> $GITHUB_OUTPUT
 
       - name: Fetch results
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
         run: |
           ASYNC_ID="${{ steps.submit.outputs.ASYNC_ID }}"
 
@@ -151,18 +200,17 @@ jobs:
           with open("/tmp/result.json") as fh:
               data = json.load(fh)
           
-          status     = normalize_status(data.get("status") or data.get("state"))
+          status         = normalize_status(data.get("status") or data.get("state"))
           findings       = []
           reviewed_files = []
           total_rules    = 0
           violated_rules = 0
           score          = "N/A"
           
-          # Shape 0: rule-keyed data at the top level (e.g. {"PCI-DSS-3.3": {"evaluated_matches": [...]}, "status": "completed"})
-          # extract_from_rule_keyed silently skips non-dict values like status/job_id strings
+          # Shape 0: rule-keyed at top level
           findings, total_rules, violated_rules, score, reviewed_files = extract_from_rule_keyed(data)
           
-          # Shape 1: rule-keyed data inside .message as a stringified JSON string
+          # Shape 1: rule-keyed inside .message as stringified JSON
           if not findings:
               message_raw = data.get("message", "")
               if isinstance(message_raw, str) and message_raw.strip().startswith("{"):
@@ -174,7 +222,7 @@ jobs:
                   except Exception as exc:
                       print(f"::warning::Could not parse message JSON: {exc}", file=sys.stderr)
           
-          # Shape 2: rule-keyed data nested under result/data/output
+          # Shape 2: rule-keyed under result/data/output
           if not findings:
               for _key in ("result", "data", "output"):
                   _nested = data.get(_key)
@@ -183,7 +231,7 @@ jobs:
                       if findings:
                           break
           
-          # Shape 3: flat findings/issues list nested under results/result/data
+          # Shape 3: flat findings list
           if not findings:
               nested = data.get("results") or data.get("result") or data.get("data") or {}
               if isinstance(nested, dict):
@@ -193,7 +241,6 @@ jobs:
                   if score == "N/A":
                       score = str(nested.get("complianceScore") or nested.get("compliance_score") or "N/A")
           
-          # Shape 4: top-level findings list
           if not findings:
               raw = data.get("findings") or []
               if isinstance(raw, list):
@@ -220,47 +267,39 @@ jobs:
           out.append(f"| **Violations Found** | {total_findings} |\n")
           out.append(f"| **Files Reviewed** | {len(reviewed_files)} |\n")
           
-          if not reviewed_files:
-              print("::warning::No files were identified in the analysis — the repository may not have been accessible", file=sys.stderr)
-          
           if reviewed_files:
-              out.append("\n---\n\n")
-              out.append("### Files Reviewed\n\n")
+              out.append("\n---\n\n### Files Reviewed\n\n")
               for f in reviewed_files:
                   out.append(f"- `{f}`\n")
           
           if total_findings > 0:
-              out.append("\n---\n\n")
-              out.append("### Violation Details\n\n")
+              out.append("\n---\n\n### Violation Details\n\n")
               for idx, finding in enumerate(findings[:20], 1):
                   if isinstance(finding, dict):
-                      rule      = finding.get("rule", "Unknown rule")
-                      issue_txt = finding.get("issue") or finding.get("message") or ""
-                      fix_txt   = finding.get("fix") or finding.get("recommendation") or ""
-                      file_name = finding.get("file", "")
+                      rule       = finding.get("rule", "Unknown rule")
+                      issue_txt  = finding.get("issue") or finding.get("message") or ""
+                      fix_txt    = finding.get("fix") or finding.get("recommendation") or ""
+                      file_name  = finding.get("file", "")
                       code_lines = finding.get("lines", "")
-                      loc_str   = f"`{file_name}` lines {code_lines}" if file_name else ""
+                      loc_str    = f"`{file_name}` lines {code_lines}" if file_name else ""
                   else:
                       rule, issue_txt, fix_txt, loc_str = str(finding), "", "", ""
                   out.append(f"#### {idx}. `{rule}`\n\n")
-                  if loc_str:
-                      out.append(f"- **File:** {loc_str}\n")
-                  if issue_txt:
-                      out.append(f"- **Issue:** {issue_txt}\n")
-                  if fix_txt:
-                      out.append(f"- **Fix:** {fix_txt}\n")
+                  if loc_str:   out.append(f"- **File:** {loc_str}\n")
+                  if issue_txt: out.append(f"- **Issue:** {issue_txt}\n")
+                  if fix_txt:   out.append(f"- **Fix:** {fix_txt}\n")
                   out.append("\n")
               if total_findings > 20:
                   out.append(f"> *{total_findings - 20} more violations not shown.*\n")
           else:
-              out.append("\n> No violations found. Repository is compliant.\n")
+              out.append("\n> ✅ No violations found. Repository is compliant.\n")
           
           with open(summary_path, "w") as f:
               f.writelines(out)
           
           print(f"Summary written ({len(out)} lines)")
           if status in ("Pending", "Processing"):
-              print("::warning::Analysis is still pending — compliance results may be incomplete", file=sys.stderr)
+              print("::warning::Analysis still pending — results may be incomplete", file=sys.stderr)
           elif status == "Failed":
               sys.exit(1)
           PYEOF
