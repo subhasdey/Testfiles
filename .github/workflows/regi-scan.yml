@@ -28,28 +28,29 @@ jobs:
       - name: Detect primary language
         id: detect_lang
         run: |
+          cat > /tmp/detect_lang.py << 'PYEOF'
+          import json, sys
+          langs = json.load(sys.stdin)
+          mapping = {
+              'Python': 'python',
+              'JavaScript': 'javascript',
+              'TypeScript': 'javascript',
+              'Java': 'java',
+              'Go': 'javascript',
+              'Ruby': 'javascript',
+          }
+          top = max(langs, key=langs.get) if langs else 'JavaScript'
+          print(mapping.get(top, 'javascript'))
+          PYEOF
           RAW_LANG=$(curl -s \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/languages" \
-            | python3 -c "
-          import json, sys
-          langs = json.load(sys.stdin)
-          mapping = {
-            "Python": "python",
-            "JavaScript": "javascript",
-            "TypeScript": "javascript",
-            "Java": "java",
-            "Go": "javascript",
-            "Ruby": "javascript",
-          }
-          top = max(langs, key=langs.get) if langs else "JavaScript"
-          print(mapping.get(top, "javascript"))
-          ")
+            | python3 /tmp/detect_lang.py)
           echo "Detected language: $RAW_LANG"
           echo "LANGUAGE=$RAW_LANG" >> $GITHUB_OUTPUT
 
-      - name: Submit compliance analysis
+      - name: Submit PCI DSS compliance analysis
         id: submit
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
@@ -258,7 +259,7 @@ jobs:
               sys.exit(0)
           
           out = []
-          out.append("## Compliance Scan Results\n\n")
+          out.append("## PCI DSS Compliance Scan Results\n\n")
           out.append("| Field | Value |\n")
           out.append("|---|---|\n")
           out.append(f"| **Status** | {status} |\n")
