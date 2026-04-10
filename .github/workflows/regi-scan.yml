@@ -415,19 +415,37 @@ jobs:
                   try: return int(str(fd.get("lines","")).split("-")[0])
                   except: return 0
 
+              # Detect comment style from file extension
+              ext = local.suffix.lower()
+              if ext in (".py", ".sh", ".rb", ".yml", ".yaml"): cc = "#"
+              elif ext in (".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".cs", ".cpp", ".c", ".kt"): cc = "//"
+              else: cc = "#"
+
               applied = 0
               for fd in sorted(fds, key=get_start, reverse=True):
-                  ls  = str(fd.get("lines",""))
-                  fix = str(fd.get("fix",""))
-                  if not ls or not fix: continue
+                  ls    = str(fd.get("lines",""))
+                  issue = str(fd.get("issue","")).strip()
+                  fix   = str(fd.get("fix","")).strip()
+                  rule  = str(fd.get("rule","")).strip()
+                  if not ls or not (issue or fix): continue
                   try:
                       parts = ls.split("-")
                       s = int(parts[0]) - 1
-                      e = int(parts[1]) if len(parts) > 1 else s + 1
-                      file_lines[s:e] = fix.split("\n")
+                      # Build comment block inserted ABOVE the offending lines
+                      comment_lines = [
+                          f"{cc} ============================================================",
+                          f"{cc} COMPLIANCE FIX REQUIRED [{rule}]",
+                      ]
+                      if issue: comment_lines.append(f"{cc} Issue: {issue}")
+                      if fix:
+                          comment_lines.append(f"{cc} Suggested fix:")
+                          for fix_line in fix.split("\n"):
+                              comment_lines.append(f"{cc}   {fix_line}")
+                      comment_lines.append(f"{cc} ============================================================")
+                      file_lines[s:s] = comment_lines
                       applied += 1
                   except Exception as ex:
-                      print(f"  Could not apply fix at lines {ls}: {ex}")
+                      print(f"  Could not annotate lines {ls}: {ex}")
 
               if applied > 0:
                   local.write_text("\n".join(file_lines), encoding="utf-8")
