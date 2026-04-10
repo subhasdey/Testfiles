@@ -316,12 +316,16 @@ jobs:
           REPO: ${{ github.repository }}
           BASE_BRANCH: ${{ github.ref_name }}
           RUN_ID: ${{ github.run_id }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           cat > /tmp/create_pr.py << 'PYEOF'
-          import json, os, sys, base64, urllib.request, urllib.error
+          import json, os, sys, urllib.request, urllib.error, subprocess
+          from pathlib import Path
           from collections import defaultdict
 
-          def gh(method, path, body=None):
+          WORKSPACE = Path(os.environ.get("GITHUB_WORKSPACE", "."))
+
+          def gh_api(method, path, body=None):
               url = f"https://api.github.com/repos/{path}"
               data = json.dumps(body).encode() if body else None
               req = urllib.request.Request(url, data=data, method=method, headers={
@@ -332,14 +336,15 @@ jobs:
               })
               try:
                   with urllib.request.urlopen(req) as r:
-                      b = r.read()
-                      return json.loads(b) if b else {}
+                      b = r.read(); return json.loads(b) if b else {}
               except urllib.error.HTTPError as e:
-                  b = e.read()
-                  return json.loads(b) if b else {}
+                  b = e.read(); return json.loads(b) if b else {}
+
+          def run_git(cmd):
+              return subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=WORKSPACE)
 
           def extract(rule_dict):
-              findings = []
+              out = []
               for rule_id, val in rule_dict.items():
                   if not isinstance(val, dict): continue
                   for match in (val.get("evaluated_matches") or []):
@@ -347,9 +352,9 @@ jobs:
                       issue = match.get("issue_summary") or match.get("issue") or ""
                       fix   = match.get("fix_summary") or match.get("fix") or ""
                       if issue:
-                          findings.append({"rule": rule_id, "issue": issue, "fix": fix,
-                                           "file": match.get("filename",""), "lines": match.get("code_lines","")})
-              return findings
+                          out.append({"rule": rule_id, "issue": issue, "fix": fix,
+                                      "file": match.get("filename",""), "lines": match.get("code_lines","")})
+              return out
 
           try: data = json.load(open("/tmp/result.json"))
           except Exception: sys.exit(0)
@@ -368,53 +373,50 @@ jobs:
                       if findings: break
 
           if not findings:
-              print("No violations — skipping PR creation")
-              sys.exit(0)
+              print("No violations — skipping PR creation"); sys.exit(0)
 
           repo       = os.environ["REPO"]
           run_id     = os.environ["RUN_ID"]
           base       = os.environ["BASE_BRANCH"]
           new_branch = f"regi/compliance-fixes-{run_id}"
 
-          ref = gh("GET", f"{repo}/git/ref/heads/{base}")
-          sha = ref.get("object",{}).get("sha")
-          if not sha: print(f"Cannot find sha for {base}"); sys.exit(0)
+          # Configure git and create local branch
+          run_git('git config user.email "regi-bot@regiagents.com"')
+          run_git('git config user.name "Regi Bot"')
+          run_git(f"git checkout -b {new_branch}")
 
-          # Delete branch if it already exists (re-run)
-          existing_ref = gh("GET", f"{repo}/git/ref/heads/{new_branch}")
-          if "object" in existing_ref:
-              gh("DELETE", f"{repo}/git/refs/heads/{new_branch}")
-              print(f"Deleted existing branch {new_branch}")
-
-          created = gh("POST", f"{repo}/git/refs", {"ref": f"refs/heads/{new_branch}", "sha": sha})
-          if "ref" not in created: print(f"Branch create failed: {created}"); sys.exit(0)
+          # ── Find a file in the workspace by absolute or relative path ─────────
+          def find_local(raw_path):
+              # Try relative path first
+              candidate = WORKSPACE / raw_path
+              if candidate.exists(): return candidate
+              # Search by filename across workspace
+              name = Path(raw_path).name
+              for p in sorted(WORKSPACE.rglob(name)):
+                  if ".git" not in p.parts: return p
+              return None
 
           # ── Apply fixes to actual source files ───────────────────────────────
           file_fixes = defaultdict(list)
-          for finding in findings:
-              fname     = str(finding.get("file","")).strip()
-              fix_code  = str(finding.get("fix","")).strip()
-              lines_str = str(finding.get("lines","")).strip()
-              if fname and fix_code and lines_str:
-                  file_fixes[fname].append(finding)
+          for fd in findings:
+              raw   = str(fd.get("file","")).strip()
+              fix   = str(fd.get("fix","")).strip()
+              lines = str(fd.get("lines","")).strip()
+              if raw and fix and lines: file_fixes[raw].append(fd)
 
           files_modified = []
-          for fname, file_findings in file_fixes.items():
-              file_data = gh("GET", f"{repo}/contents/{fname}?ref={new_branch}")
-              if "content" not in file_data:
-                  print(f"Could not read {fname}: {file_data.get('message','')}")
-                  continue
-              raw     = file_data["content"].replace("\n","").replace(" ","")
-              content = base64.b64decode(raw).decode("utf-8","replace")
-              file_lines = content.split("\n")
+          for raw_path, fds in file_fixes.items():
+              local = find_local(raw_path)
+              if not local:
+                  print(f"Could not find {raw_path} in workspace"); continue
+              file_lines = local.read_text(encoding="utf-8", errors="replace").split("\n")
 
               def get_start(fd):
                   try: return int(str(fd.get("lines","")).split("-")[0])
                   except: return 0
 
-              # Apply from bottom to top so earlier line numbers stay valid
               applied = 0
-              for fd in sorted(file_findings, key=get_start, reverse=True):
+              for fd in sorted(fds, key=get_start, reverse=True):
                   ls  = str(fd.get("lines",""))
                   fix = str(fd.get("fix",""))
                   if not ls or not fix: continue
@@ -428,27 +430,22 @@ jobs:
                       print(f"  Could not apply fix at lines {ls}: {ex}")
 
               if applied > 0:
-                  new_content = "\n".join(file_lines)
-                  enc = base64.b64encode(new_content.encode()).decode()
-                  r = gh("PUT", f"{repo}/contents/{fname}", {
-                      "message": f"fix: apply {applied} PCI DSS compliance fix(es) in {fname}",
-                      "content": enc, "sha": file_data["sha"], "branch": new_branch
-                  })
-                  if "content" in r:
-                      files_modified.append(fname)
-                      print(f"Applied {applied} fix(es) to {fname}")
+                  local.write_text("\n".join(file_lines), encoding="utf-8")
+                  rel = str(local.relative_to(WORKSPACE))
+                  run_git(f'git add "{rel}"')
+                  r = run_git(f'git commit -m "fix: apply {applied} PCI DSS fix(es) in {rel}"')
+                  if r.returncode == 0:
+                      files_modified.append(rel)
+                      print(f"Patched {rel} ({applied} fix(es))")
                   else:
-                      print(f"Failed to commit {fname}: {r.get('message','')}")
+                      print(f"Commit failed for {rel}: {r.stderr}")
 
           # ── Commit COMPLIANCE_REPORT.md ───────────────────────────────────────
-          patched_note = (f"\n\n**Files automatically patched:** " +
-                          ", ".join(f"`{f}`" for f in files_modified)) if files_modified else ""
-          rpt = [
-              "# PCI DSS Compliance Violations", "",
-              f"**Repository:** `{repo}`  ", f"**Branch:** `{base}`  ",
-              f"**Run:** [{run_id}](https://github.com/{repo}/actions/runs/{run_id})  ",
-              f"**Violations found:** {len(findings)}",
-              f"**Files patched:** {len(files_modified)}", "", "---", "", "## Violations & Suggested Fixes", ""]
+          rpt = ["# PCI DSS Compliance Violations", "",
+                 f"**Repository:** `{repo}`  ", f"**Branch:** `{base}`  ",
+                 f"**Run:** [{run_id}](https://github.com/{repo}/actions/runs/{run_id})  ",
+                 f"**Violations found:** {len(findings)}",
+                 f"**Files patched:** {len(files_modified)}", "", "---", "", "## Violations & Suggested Fixes", ""]
           for i, fd in enumerate(findings, 1):
               rpt += [f"### {i}. `{fd['rule']}`"]
               if fd["file"]: rpt += [f"**File:** `{fd['file']}`" + (f" lines {fd['lines']}" if fd["lines"] else "")]
@@ -456,15 +453,21 @@ jobs:
               if fd["fix"]:   rpt += ["**Proposed fix:**", "", "```", fd["fix"], "```"]
               rpt += ["", "---", ""]
           rpt += ["", "> Generated by [Regi Compliance Scanner](https://www.regiagents.com)"]
-          enc_rpt = base64.b64encode("\n".join(rpt).encode()).decode()
-          ex_rpt  = gh("GET", f"{repo}/contents/COMPLIANCE_REPORT.md?ref={new_branch}")
-          rpt_body = {"message": f"chore: add PCI DSS compliance report ({len(findings)} violations)",
-                      "content": enc_rpt, "branch": new_branch}
-          if "sha" in ex_rpt: rpt_body["sha"] = ex_rpt["sha"]
-          gh("PUT", f"{repo}/contents/COMPLIANCE_REPORT.md", rpt_body)
+          (WORKSPACE / "COMPLIANCE_REPORT.md").write_text("\n".join(rpt))
+          run_git("git add COMPLIANCE_REPORT.md")
+          run_git(f'git commit -m "chore: add PCI DSS compliance report ({len(findings)} violations)"')
+
+          # ── Push branch ───────────────────────────────────────────────────────
+          run_git(f"git push origin --delete {new_branch} 2>/dev/null || true")
+          push = run_git(f"git push -u origin {new_branch}")
+          if push.returncode != 0:
+              print(f"Push failed: {push.stderr}"); sys.exit(1)
+          print(f"Pushed {new_branch}")
 
           # ── Open PR ───────────────────────────────────────────────────────────
           patch_rows = "".join(f"| `{f}` | patched |\n" for f in files_modified)
+          patched_note = ("\n\n**Files automatically patched:** " +
+                          ", ".join(f"`{f}`" for f in files_modified)) if files_modified else ""
           pr_body = (
               f"## PCI DSS Compliance — {len(findings)} violation(s) found\n\n"
               f"This PR was automatically created by [Regi](https://www.regiagents.com) "
@@ -476,7 +479,7 @@ jobs:
               + "Review `COMPLIANCE_REPORT.md` for the full violation list and any remaining manual fixes.\n\n"
               + f"> [View Actions run](https://github.com/{repo}/actions/runs/{run_id})"
           )
-          pr = gh("POST", f"{repo}/pulls", {
+          pr = gh_api("POST", f"{repo}/pulls", {
               "title": f"fix: PCI DSS compliance — {len(findings)} violation(s) in {len(files_modified)} file(s)",
               "body": pr_body, "head": new_branch, "base": base,
           })
