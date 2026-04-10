@@ -319,6 +319,7 @@ jobs:
         run: |
           cat > /tmp/create_pr.py << 'PYEOF'
           import json, os, sys, base64, urllib.request, urllib.error
+          from collections import defaultdict
 
           def gh(method, path, body=None):
               url = f"https://api.github.com/repos/{path}"
@@ -331,11 +332,11 @@ jobs:
               })
               try:
                   with urllib.request.urlopen(req) as r:
-                      body = r.read()
-                      return json.loads(body) if body else {}
+                      b = r.read()
+                      return json.loads(b) if b else {}
               except urllib.error.HTTPError as e:
-                  body = e.read()
-                  return json.loads(body) if body else {}
+                  b = e.read()
+                  return json.loads(b) if b else {}
 
           def extract(rule_dict):
               findings = []
@@ -370,16 +371,16 @@ jobs:
               print("No violations — skipping PR creation")
               sys.exit(0)
 
-          repo      = os.environ["REPO"]
-          run_id    = os.environ["RUN_ID"]
-          base      = os.environ["BASE_BRANCH"]
+          repo       = os.environ["REPO"]
+          run_id     = os.environ["RUN_ID"]
+          base       = os.environ["BASE_BRANCH"]
           new_branch = f"regi/compliance-fixes-{run_id}"
 
           ref = gh("GET", f"{repo}/git/ref/heads/{base}")
           sha = ref.get("object",{}).get("sha")
           if not sha: print(f"Cannot find sha for {base}"); sys.exit(0)
 
-          # Delete branch if it already exists (re-run of same workflow)
+          # Delete branch if it already exists (re-run)
           existing_ref = gh("GET", f"{repo}/git/ref/heads/{new_branch}")
           if "object" in existing_ref:
               gh("DELETE", f"{repo}/git/refs/heads/{new_branch}")
@@ -388,47 +389,99 @@ jobs:
           created = gh("POST", f"{repo}/git/refs", {"ref": f"refs/heads/{new_branch}", "sha": sha})
           if "ref" not in created: print(f"Branch create failed: {created}"); sys.exit(0)
 
-          lines = [
+          # ── Apply fixes to actual source files ───────────────────────────────
+          file_fixes = defaultdict(list)
+          for finding in findings:
+              fname     = str(finding.get("file","")).strip()
+              fix_code  = str(finding.get("fix","")).strip()
+              lines_str = str(finding.get("lines","")).strip()
+              if fname and fix_code and lines_str:
+                  file_fixes[fname].append(finding)
+
+          files_modified = []
+          for fname, file_findings in file_fixes.items():
+              file_data = gh("GET", f"{repo}/contents/{fname}?ref={new_branch}")
+              if "content" not in file_data:
+                  print(f"Could not read {fname}: {file_data.get('message','')}")
+                  continue
+              raw     = file_data["content"].replace("\n","").replace(" ","")
+              content = base64.b64decode(raw).decode("utf-8","replace")
+              file_lines = content.split("\n")
+
+              def get_start(fd):
+                  try: return int(str(fd.get("lines","")).split("-")[0])
+                  except: return 0
+
+              # Apply from bottom to top so earlier line numbers stay valid
+              applied = 0
+              for fd in sorted(file_findings, key=get_start, reverse=True):
+                  ls  = str(fd.get("lines",""))
+                  fix = str(fd.get("fix",""))
+                  if not ls or not fix: continue
+                  try:
+                      parts = ls.split("-")
+                      s = int(parts[0]) - 1
+                      e = int(parts[1]) if len(parts) > 1 else s + 1
+                      file_lines[s:e] = fix.split("\n")
+                      applied += 1
+                  except Exception as ex:
+                      print(f"  Could not apply fix at lines {ls}: {ex}")
+
+              if applied > 0:
+                  new_content = "\n".join(file_lines)
+                  enc = base64.b64encode(new_content.encode()).decode()
+                  r = gh("PUT", f"{repo}/contents/{fname}", {
+                      "message": f"fix: apply {applied} PCI DSS compliance fix(es) in {fname}",
+                      "content": enc, "sha": file_data["sha"], "branch": new_branch
+                  })
+                  if "content" in r:
+                      files_modified.append(fname)
+                      print(f"Applied {applied} fix(es) to {fname}")
+                  else:
+                      print(f"Failed to commit {fname}: {r.get('message','')}")
+
+          # ── Commit COMPLIANCE_REPORT.md ───────────────────────────────────────
+          patched_note = (f"\n\n**Files automatically patched:** " +
+                          ", ".join(f"`{f}`" for f in files_modified)) if files_modified else ""
+          rpt = [
               "# PCI DSS Compliance Violations", "",
               f"**Repository:** `{repo}`  ", f"**Branch:** `{base}`  ",
               f"**Run:** [{run_id}](https://github.com/{repo}/actions/runs/{run_id})  ",
-              f"**Violations found:** {len(findings)}", "", "---", "", "## Violations & Suggested Fixes", ""]
-          for i, f in enumerate(findings, 1):
-              lines += [f"### {i}. `{f['rule']}`"]
-              if f["file"]: lines += [f"**File:** `{f['file']}`" + (f" lines {f['lines']}" if f["lines"] else "")]
-              if f["issue"]: lines += [f"**Issue:** {f['issue']}"]
-              if f["fix"]:   lines += ["**Fix:**", "", "```", f["fix"], "```"]
-              lines += ["", "---", ""]
-          lines += ["", "> Generated by [Regi Compliance Scanner](https://www.regiagents.com)"]
-          content = "\n".join(lines)
-          encoded = base64.b64encode(content.encode()).decode()
+              f"**Violations found:** {len(findings)}",
+              f"**Files patched:** {len(files_modified)}", "", "---", "", "## Violations & Suggested Fixes", ""]
+          for i, fd in enumerate(findings, 1):
+              rpt += [f"### {i}. `{fd['rule']}`"]
+              if fd["file"]: rpt += [f"**File:** `{fd['file']}`" + (f" lines {fd['lines']}" if fd["lines"] else "")]
+              if fd["issue"]: rpt += [f"**Issue:** {fd['issue']}"]
+              if fd["fix"]:   rpt += ["**Proposed fix:**", "", "```", fd["fix"], "```"]
+              rpt += ["", "---", ""]
+          rpt += ["", "> Generated by [Regi Compliance Scanner](https://www.regiagents.com)"]
+          enc_rpt = base64.b64encode("\n".join(rpt).encode()).decode()
+          ex_rpt  = gh("GET", f"{repo}/contents/COMPLIANCE_REPORT.md?ref={new_branch}")
+          rpt_body = {"message": f"chore: add PCI DSS compliance report ({len(findings)} violations)",
+                      "content": enc_rpt, "branch": new_branch}
+          if "sha" in ex_rpt: rpt_body["sha"] = ex_rpt["sha"]
+          gh("PUT", f"{repo}/contents/COMPLIANCE_REPORT.md", rpt_body)
 
-          existing = gh("GET", f"{repo}/contents/COMPLIANCE_REPORT.md?ref={new_branch}")
-          fbody = {"message": f"chore: add PCI DSS compliance report ({len(findings)} violations)",
-                   "content": encoded, "branch": new_branch}
-          if "sha" in existing: fbody["sha"] = existing["sha"]
-          gh("PUT", f"{repo}/contents/COMPLIANCE_REPORT.md", fbody)
-
-          pr_body = f"""## PCI DSS Compliance Scan — {len(findings)} violation(s) found
-
-          This PR was automatically created by [Regi](https://www.regiagents.com) after detecting compliance violations on `{base}`.
-
-          | Metric | Value |
-          |---|---|
-          | Violations | {len(findings)} |
-
-          Review `COMPLIANCE_REPORT.md` in this PR for all violations and suggested fixes.
-
-          > [View run](https://github.com/{repo}/actions/runs/{run_id})"""
-
+          # ── Open PR ───────────────────────────────────────────────────────────
+          patch_rows = "".join(f"| `{f}` | patched |\n" for f in files_modified)
+          pr_body = (
+              f"## PCI DSS Compliance — {len(findings)} violation(s) found\n\n"
+              f"This PR was automatically created by [Regi](https://www.regiagents.com) "
+              f"after detecting compliance violations on `{base}`.{patched_note}\n\n"
+              f"| Metric | Value |\n|---|---|\n"
+              f"| Violations | {len(findings)} |\n"
+              f"| Files patched | {len(files_modified)} |\n\n"
+              + (f"### Patched files\n\n| File | Status |\n|---|---|\n{patch_rows}\n" if files_modified else "")
+              + "Review `COMPLIANCE_REPORT.md` for the full violation list and any remaining manual fixes.\n\n"
+              + f"> [View Actions run](https://github.com/{repo}/actions/runs/{run_id})"
+          )
           pr = gh("POST", f"{repo}/pulls", {
-              "title": f"fix: PCI DSS compliance — {len(findings)} violation(s) detected",
-              "body": pr_body,
-              "head": new_branch,
-              "base": base,
+              "title": f"fix: PCI DSS compliance — {len(findings)} violation(s) in {len(files_modified)} file(s)",
+              "body": pr_body, "head": new_branch, "base": base,
           })
           url = pr.get("html_url","")
           if url: print(f"PR created: {url}")
-          else: print(f"PR response: {pr}")
+          else:   print(f"PR response: {pr}")
           PYEOF
           python3 /tmp/create_pr.py
