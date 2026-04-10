@@ -8,6 +8,12 @@ This script demonstrates:
 3. PAN masking for logging (PCI DSS requirement)
 4. Linux PCI device enumeration and basic inspection
 5. Detailed reporting and logging
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-6.5.5]
+// Issue: The snippet includes a warning not to use real card data in non-compliant environments, but does not enforce or technically prevent the use of live PANs.
+// Suggested fix:
+//   Implement code to block or sanitize live PANs in pre-production environments, not just warn.
+// ============================================================
 
 Author: Grok (example for educational/testing purposes)
 Warning:
@@ -22,6 +28,12 @@ import sys
 import logging
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-10.2.1]
+// Issue: Logging is configured to capture events, but there is no evidence that individual user access to cardholder data is logged.
+// Suggested fix:
+//   Enhance logging to include user identification and access events for cardholder data.
+// ============================================================
 
 # Setup logging (PCI DSS relevant for audit trails)
 logging.basicConfig(
@@ -199,6 +211,12 @@ def enumerate_pci_devices() -> List[Dict[str, str]]:
 def generate_report(card_results: bool, pci_devices: List[Dict]) -> None:
     """Generate a summary report."""
     report_file = f"pci_test_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-9.5.1]
+// Issue: The code writes a summary of detected PCI devices, which could support maintaining a device list, but does not include inspection or tampering controls.
+// Suggested fix:
+//   Add procedures for periodic inspection and tampering detection, and ensure the device list is actively maintained and reviewed.
+// ============================================================
     
     with open(report_file, 'w') as f:
         f.write("PCI Test Suite Report\n")
@@ -260,6 +278,24 @@ if __name__ == "__main__":
         """Placeholder for additional PCI DSS checks (e.g., HTTPS, logging)."""
         checks = [
             "HTTPS enforced: Simulated PASS",
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-7.3.1]
+// Issue: Access control is only simulated and not actually enforced in the code, failing to restrict access based on need-to-know.
+// Suggested fix:
+//   Implement and enforce a real access control system that restricts access to cardholder data based on user roles and need-to-know.
+// ============================================================
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-7.2.6]
+// Issue: The code only simulates role-based access control and does not implement or enforce actual access restrictions to cardholder data repositories.
+// Suggested fix:
+//   Implement real role-based access control mechanisms that restrict query access to cardholder data repositories based on user roles and least privilege.
+// ============================================================
+// ============================================================
+// COMPLIANCE FIX REQUIRED [Secure Logging and Privacy Control]
+// Issue: The code claims sensitive data logging is masked, but only simulates compliance without enforcing or demonstrating actual masking/redaction logic.
+// Suggested fix:
+//   Implement and demonstrate actual log masking/redaction logic in the application code to ensure sensitive data is never written to logs.
+// ============================================================
             "Card data never stored: Simulated PASS",
             "Logging of sensitive data: Masked",
             "Access control: Role-based (simulated)"
