@@ -8,35 +8,7 @@ This script demonstrates:
 3. PAN masking for logging (PCI DSS requirement)
 4. Linux PCI device enumeration and basic inspection
 5. Detailed reporting and logging
-
-Author: Grok (example for educational/testing purposes)
-Warning:
-- Never use real card data in non-compliant environments.
-- This is for testing only. For production PCI DSS compliance, use tokenization services.
-"""
-
-import argparse
-import os
-import re
-import sys
-import logging
-from datetime import datetime
-from typing import List, Dict, Tuple, Optional
-
-# Setup logging (PCI DSS relevant for audit trails)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("pci_test_log.txt", mode='a'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# Common PCI DSS test cards (these are safe to use in development)
-TEST_CARDS: Dict[str, List[str]] = {
-    "Visa": [
+Implement technical controls to block live PANs in pre-production or add automated checks to enforce this policy.
         "4111111111111111",
         "4012888888881881",
         "4222222222222220"
@@ -136,19 +108,7 @@ def run_card_tests() -> None:
     logger.info("=== Card Tests Completed ===\n")
 
 
-def enumerate_pci_devices() -> List[Dict[str, str]]:
-    """Enumerate PCI devices using Linux sysfs (safe read-only)."""
-    devices = []
-    pci_path = "/sys/bus/pci/devices"
-    
-    if not os.path.exists(pci_path):
-        logger.warning("PCI sysfs not found. This script works best on Linux.")
-        return devices
-    
-    logger.info("=== Starting PCI Device Enumeration ===")
-    
-    try:
-        for dev_dir in os.listdir(pci_path):
+Expand inventory logic to include all in-scope system components and ensure it is kept current.
             full_path = os.path.join(pci_path, dev_dir)
             if not os.path.isdir(full_path):
                 continue
@@ -182,15 +142,7 @@ def enumerate_pci_devices() -> List[Dict[str, str]]:
                 import subprocess
                 result = subprocess.check_output(["lspci", "-s", dev_dir], stderr=subprocess.DEVNULL).decode().strip()
                 device_info["description"] = result
-            except Exception:
-                device_info["description"] = "N/A (lspci not available)"
-            
-            devices.append(device_info)
-            logger.info(f"Found PCI device: {dev_dir} | Vendor: {device_info.get('vendor_id', 'N/A')} | Device: {device_info.get('device_id', 'N/A')}")
-    
-    except Exception as e:
-        logger.error(f"Error during PCI enumeration: {e}")
-    
+Ensure inventory includes all in-scope components and is regularly updated.
     logger.info(f"Total PCI devices found: {len(devices)}")
     logger.info("=== PCI Enumeration Completed ===\n")
     return devices
@@ -199,17 +151,7 @@ def enumerate_pci_devices() -> List[Dict[str, str]]:
 def generate_report(card_results: bool, pci_devices: List[Dict]) -> None:
     """Generate a summary report."""
     report_file = f"pci_test_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-    
-    with open(report_file, 'w') as f:
-        f.write("PCI Test Suite Report\n")
-        f.write("=" * 50 + "\n")
-        f.write(f"Generated: {datetime.now()}\n\n")
-        
-        f.write("Card Validation Summary:\n")
-        f.write(f"   Test cards passed: {'Yes' if card_results else 'No'}\n\n")
-        
-        f.write("PCI Devices Summary:\n")
-        f.write(f"   Total devices detected: {len(pci_devices)}\n")
+Add periodic inspection routines and tampering detection for POI devices.
         for dev in pci_devices[:10]:  # Limit output
             f.write(f"   {dev.get('address')} - {dev.get('description', 'N/A')[:80]}\n")
         if len(pci_devices) > 10:
@@ -260,13 +202,4 @@ if __name__ == "__main__":
         """Placeholder for additional PCI DSS checks (e.g., HTTPS, logging)."""
         checks = [
             "HTTPS enforced: Simulated PASS",
-            "Card data never stored: Simulated PASS",
-            "Logging of sensitive data: Masked",
-            "Access control: Role-based (simulated)"
-        ]
-        return "\n".join(checks)
-    
-    # Call dummy function (just to add lines)
-    logger.debug("Compliance checklist:\n" + dummy_compliance_check())
-    
-    main()
+Implement and enforce a real access control system that restricts access based on user roles and need-to-know.
