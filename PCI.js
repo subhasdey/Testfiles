@@ -8,6 +8,12 @@ This script demonstrates:
 3. PAN masking for logging (PCI DSS requirement)
 4. Linux PCI device enumeration and basic inspection
 5. Detailed reporting and logging
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-6.5.5]
+// Issue: The snippet includes a warning not to use real card data in non-compliant environments, but does not enforce or technically prevent the use of live PANs in pre-production.
+// Suggested fix:
+//   Implement technical controls to block or sanitize live PANs in pre-production environments, and enforce this via code or configuration.
+// ============================================================
 
 Author: Grok (example for educational/testing purposes)
 Warning:
@@ -22,6 +28,12 @@ import sys
 import logging
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-10.2.1]
+// Issue: Logging is set up for audit trails, but there is no evidence that logs capture all individual user access to cardholder data.
+// Suggested fix:
+//   Enhance logging to explicitly record all individual user access to cardholder data, including user identifiers and access details.
+// ============================================================
 
 # Setup logging (PCI DSS relevant for audit trails)
 logging.basicConfig(
@@ -136,6 +148,12 @@ def run_card_tests() -> None:
     logger.info("=== Card Tests Completed ===\n")
 
 
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-12.5.1]
+// Issue: Enumerates PCI devices, which partially addresses inventory, but does not ensure a comprehensive or current inventory of all in-scope components.
+// Suggested fix:
+//   Expand inventory logic to include all in-scope system components and ensure it is kept current.
+// ============================================================
 def enumerate_pci_devices() -> List[Dict[str, str]]:
     """Enumerate PCI devices using Linux sysfs (safe read-only)."""
     devices = []
@@ -182,6 +200,12 @@ def enumerate_pci_devices() -> List[Dict[str, str]]:
                 import subprocess
                 result = subprocess.check_output(["lspci", "-s", dev_dir], stderr=subprocess.DEVNULL).decode().strip()
                 device_info["description"] = result
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-12.5.1]
+// Issue: Logs discovered PCI devices, but does not ensure a comprehensive or current inventory of all in-scope components.
+// Suggested fix:
+//   Maintain a complete and current inventory of all PCI DSS in-scope system components.
+// ============================================================
             except Exception:
                 device_info["description"] = "N/A (lspci not available)"
             
@@ -199,6 +223,12 @@ def enumerate_pci_devices() -> List[Dict[str, str]]:
 def generate_report(card_results: bool, pci_devices: List[Dict]) -> None:
     """Generate a summary report."""
     report_file = f"pci_test_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-9.5.1]
+// Issue: The snippet writes a summary of detected PCI devices but does not maintain a persistent list or include inspection or tampering checks.
+// Suggested fix:
+//   Implement persistent tracking, periodic inspection, and tampering detection for POI devices as required by PCI DSS.
+// ============================================================
     
     with open(report_file, 'w') as f:
         f.write("PCI Test Suite Report\n")
@@ -260,6 +290,24 @@ if __name__ == "__main__":
         """Placeholder for additional PCI DSS checks (e.g., HTTPS, logging)."""
         checks = [
             "HTTPS enforced: Simulated PASS",
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-7.3.1]
+// Issue: Access control is simulated and not actually enforced; no mechanism restricts access based on user need-to-know.
+// Suggested fix:
+//   Implement and enforce actual access control mechanisms (e.g., RBAC) in code to restrict access based on user roles.
+// ============================================================
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-7.2.6]
+// Issue: Access control is only simulated and not actually enforced in the code; no real RBAC or access restriction is implemented.
+// Suggested fix:
+//   Implement real role-based access control and restrict query access to cardholder data repositories in code.
+// ============================================================
+// ============================================================
+// COMPLIANCE FIX REQUIRED [Secure Logging and Privacy Control]
+// Issue: The code claims sensitive data logging is masked, but only simulates compliance without enforcing or demonstrating actual masking/redaction logic.
+// Suggested fix:
+//   Implement and demonstrate actual log masking/redaction logic in code, ensuring no personal or sensitive data is written to logs.
+// ============================================================
             "Card data never stored: Simulated PASS",
             "Logging of sensitive data: Masked",
             "Access control: Role-based (simulated)"
