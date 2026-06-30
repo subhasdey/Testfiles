@@ -8,6 +8,12 @@ This script demonstrates:
 3. PAN masking for logging (PCI DSS requirement)
 4. Linux PCI device enumeration and basic inspection
 5. Detailed reporting and logging
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-6.5.5]
+// Issue: The snippet includes a warning not to use real card data in non-compliant environments, but does not enforce or technically prevent live PAN usage in pre-production.
+// Suggested fix:
+//   Implement code-level controls to block or sanitize live PANs in pre-production environments.
+// ============================================================
 
 Author: Grok (example for educational/testing purposes)
 Warning:
@@ -22,6 +28,12 @@ import sys
 import logging
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-10.2.1]
+// Issue: Logging is configured for audit trails, but there is no evidence that all activities or individual user access to cardholder data are captured.
+// Suggested fix:
+//   Enhance logging to explicitly record all user access and actions on cardholder data.
+// ============================================================
 
 # Setup logging (PCI DSS relevant for audit trails)
 logging.basicConfig(
@@ -199,6 +211,12 @@ def enumerate_pci_devices() -> List[Dict[str, str]]:
 def generate_report(card_results: bool, pci_devices: List[Dict]) -> None:
     """Generate a summary report."""
     report_file = f"pci_test_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+// ============================================================
+// COMPLIANCE FIX REQUIRED [PCI-4.0.1-9.5.1]
+// Issue: The report includes a summary of detected PCI devices, which partially addresses maintaining a list, but does not cover inspection or tampering protection.
+// Suggested fix:
+//   Add procedures and code for periodic inspection and tampering detection of POI devices.
+// ============================================================
     
     with open(report_file, 'w') as f:
         f.write("PCI Test Suite Report\n")
